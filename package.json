@@ -1,0 +1,256 @@
+{
+  "publisher": "mokup",
+  "name": "mokup-vscode",
+  "displayName": "Mokup",
+  "version": "0.0.1",
+  "private": true,
+  "packageManager": "pnpm@10.27.0",
+  "description": "VS Code extension for mokup: config detection, OpenAPI/d.ts import/export, mock preview.",
+  "author": "Mokup Team",
+  "license": "MIT",
+  "funding": "https://github.com/sponsors/antfu",
+  "homepage": "https://github.com/daguanren21/mokup-vscode-extension",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/daguanren21/mokup-vscode-extension"
+  },
+  "bugs": {
+    "url": "https://github.com/daguanren21/mokup-vscode-extension/issues"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/index.cjs",
+  "icon": "res/icon.png",
+  "files": [
+    "LICENSE.md",
+    "dist/*",
+    "res/*"
+  ],
+  "engines": {
+    "vscode": "^1.97.0"
+  },
+  "activationEvents": [
+    "onView:mokup.routes",
+    "onView:workbench.view.testing"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "mokup.importOpenAPI",
+        "title": "Mokup: Import OpenAPI"
+      },
+      {
+        "command": "mokup.exportOpenAPI",
+        "title": "Mokup: Export OpenAPI"
+      },
+      {
+        "command": "mokup.importDts",
+        "title": "Mokup: Import DTS"
+      },
+      {
+        "command": "mokup.rescanWorkspace",
+        "title": "Mokup: Rescan Workspace"
+      },
+      {
+        "command": "mokup.startMock",
+        "title": "Mokup: Start Mock"
+      },
+      {
+        "command": "mokup.startAll",
+        "title": "Mokup: Start All"
+      },
+      {
+        "command": "mokup.stopMock",
+        "title": "Mokup: Stop Mock"
+      },
+      {
+        "command": "mokup.stopAll",
+        "title": "Mokup: Stop All"
+      },
+      {
+        "command": "mokup.showRunners",
+        "title": "Mokup: Show Running Instances"
+      },
+      {
+        "command": "mokup.previewTemplate",
+        "title": "Mokup: Preview Import Template"
+      },
+      {
+        "command": "mokup.previewMock",
+        "title": "Mokup: Preview Mock Response"
+      },
+      {
+        "command": "mokup.routes.refresh",
+        "title": "Mokup: Refresh Routes"
+      },
+      {
+        "command": "mokup.routes.previewSelected",
+        "title": "Mokup: Preview Selected Route"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Mokup",
+      "properties": {
+        "mokup.openapi.import.format": {
+          "type": "string",
+          "enum": ["ts", "json"],
+          "default": "ts",
+          "description": "File format for OpenAPI import output."
+        },
+        "mokup.openapi.import.tsTemplate": {
+          "type": "string",
+          "default": "",
+          "description": "Inline template for TS handler generation. Placeholders: {{method}} {{methodLower}} {{path}} {{pathRaw}} {{body}} {{bodyReturn}}."
+        },
+        "mokup.openapi.import.tsTemplatePath": {
+          "type": "string",
+          "default": "",
+          "description": "Template file path for TS handler generation (absolute or workspace-relative)."
+        },
+        "mokup.openapi.import.jsonTemplate": {
+          "type": "string",
+          "default": "",
+          "description": "Inline template for JSON output. Use {{json}} placeholder."
+        },
+        "mokup.openapi.import.jsonTemplatePath": {
+          "type": "string",
+          "default": "",
+          "description": "Template file path for JSON output (absolute or workspace-relative)."
+        },
+        "mokup.openapi.import.writeFiles": {
+          "type": "boolean",
+          "default": true,
+          "description": "Write mock files immediately after OpenAPI import."
+        },
+        "mokup.openapi.import.conflict": {
+          "type": "string",
+          "enum": ["prompt", "overwrite", "skip", "backup"],
+          "default": "prompt",
+          "description": "Conflict strategy when mock files already exist."
+        },
+        "mokup.openapi.scanGlobs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["**/*.{yaml,yml,json}"],
+          "description": "Glob patterns to scan OpenAPI files in workspace."
+        },
+        "mokup.dts.scanGlobs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["**/*.d.ts"],
+          "description": "Glob patterns to scan d.ts files in workspace."
+        },
+        "mokup.workspace.monorepoMode": {
+          "type": "string",
+          "enum": ["auto", "on", "off"],
+          "default": "auto",
+          "description": "Enable monorepo detection."
+        },
+        "mokup.entries.preferViteConfig": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prefer entries parsed from Vite config when available."
+        },
+        "mokup.runner.command": {
+          "type": "string",
+          "default": "mokup",
+          "description": "Command to start mokup server."
+        },
+        "mokup.runner.mode": {
+          "type": "string",
+          "enum": ["server", "sw"],
+          "default": "server",
+          "description": "Runner mode; when set to sw, injects --mode sw."
+        },
+        "mokup.build.command": {
+          "type": "string",
+          "default": "mokup",
+          "description": "Command to run mokup CLI build."
+        },
+        "mokup.runner.args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Arguments for mokup runner command. Supports placeholders {packageRoot} {entryDir} {prefix}."
+        },
+        "mokup.build.args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["build"],
+          "description": "Arguments for mokup build command. Supports placeholders {packageRoot} {entryDir} {prefix}."
+        }
+      }
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "mokup.routes",
+          "name": "Mokup Routes"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "mokup.routes.refresh",
+          "when": "view == mokup.routes",
+          "group": "navigation",
+          "title": "Refresh",
+          "icon": "$(refresh)"
+        },
+        {
+          "command": "mokup.routes.previewSelected",
+          "when": "view == mokup.routes",
+          "group": "navigation",
+          "title": "Preview",
+          "icon": "$(eye)"
+        },
+        {
+          "command": "mokup.exportOpenAPI",
+          "when": "view == mokup.routes",
+          "group": "navigation",
+          "title": "Export OpenAPI",
+          "icon": "$(cloud-download)"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "tsdown src/index.ts --external vscode",
+    "dev": "nr build --watch --sourcemap",
+    "prepare": "nr update",
+    "update": "vscode-ext-gen --output src/generated/meta.ts",
+    "lint": "eslint .",
+    "test": "vitest",
+    "typecheck": "tsc --noEmit",
+    "vscode:prepublish": "nr build",
+    "release": "bumpp",
+    "ext:package": "vsce package --no-dependencies",
+    "ext:publish": "vsxpub --no-dependencies"
+  },
+  "devDependencies": {
+    "@antfu/eslint-config": "^6.7.3",
+    "@antfu/ni": "^28.0.0",
+    "@types/node": "^25.0.3",
+    "@types/vscode": "^1.97.0",
+    "@vscode/vsce": "^3.7.1",
+    "bumpp": "^10.3.2",
+    "eslint": "^9.39.2",
+    "ovsx": "^0.10.7",
+    "reactive-vscode": "^1.0.0-beta.2",
+    "taze": "^19.9.2",
+    "tsdown": "^0.19.0-beta.3",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.0",
+    "vitest": "^4.0.16",
+    "vscode-ext-gen": "^1.5.1",
+    "vsxpub": "^0.1.2"
+  },
+  "dependencies": {
+    "jsonc-parser": "^3.3.1",
+    "typescript": "^5.9.3",
+    "yaml": "^2.7.0"
+  }
+}
