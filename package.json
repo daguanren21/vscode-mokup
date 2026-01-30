@@ -8,7 +8,6 @@
   "description": "VS Code extension for mokup: config detection, OpenAPI/d.ts import/export, mock preview.",
   "author": "Mokup Team",
   "license": "MIT",
-  "funding": "https://github.com/sponsors/antfu",
   "homepage": "https://github.com/daguanren21/mokup-vscode-extension",
   "repository": {
     "type": "git",
