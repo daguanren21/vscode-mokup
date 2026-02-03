@@ -16,18 +16,26 @@ import type { MockRoute } from '../mock/routes'
 import { collectWorkspaceEntries } from '../scan/collect'
 import { scanMockRoutes } from '../mock/routes'
 import { renderCliOutputHtml } from '../preview/cli-output'
-import { readRouteFile, renderPreviewHtml } from '../preview/webview'
+import { readRouteFile, renderRequestPreviewHtml } from '../preview/webview'
+import { handlePreviewRequestMessage } from '../preview/request'
+import { MokupRunner } from '../runner/manager'
 import { parseCliOutput, runCliBuild } from '../runner/build'
 import { checkCliVersion } from '../runner/version'
+import { resolveBuildCommand, resolveRunnerCommand } from '../runner/resolve'
 
 type ItemData =
   | { type: 'entry', entry: DetectedEntry }
   | { type: 'route', entry: DetectedEntry, route: MockRoute }
 
-export function createMokupTestController(output: OutputChannel) {
+export function createMokupTestController(
+  output: OutputChannel,
+  runner?: MokupRunner,
+  runnerVersionChecked?: Map<string, boolean>,
+) {
   const controller = tests.createTestController('mokup.tests', 'Mokup')
   const itemData = new WeakMap<TestItem, ItemData>()
   const cliVersionChecked = new Map<string, boolean>()
+  const runnerVersionCache = runnerVersionChecked ?? new Map<string, boolean>()
 
   controller.refreshHandler = async () => {
     await refreshItems(controller, itemData)
@@ -43,7 +51,7 @@ export function createMokupTestController(output: OutputChannel) {
   controller.createRunProfile(
     'Preview Response',
     TestRunProfileKind.Debug,
-    request => runPreview(request, controller, itemData),
+    request => runPreview(request, controller, itemData, runner, runnerVersionCache),
     false,
   )
 
@@ -111,13 +119,9 @@ async function runBuild(
   for (const { item, entry } of entries.values()) {
     run.started(item)
     const config = workspace.getConfiguration('mokup')
-    const command = config.get<string>('build.command', config.get('runner.command', 'mokup'))
-    const mode = config.get<'server' | 'sw'>('runner.mode', 'server')
-    let args = config.get<string[]>('build.args', ['build'])
-    args = applyRunnerMode(args, mode)
-
-    await checkCliVersionOnce(command, entry.packageRoot, cliVersionChecked)
-    const result = await runCliBuild(entry, command, args, output)
+    const resolved = await resolveBuildCommand(entry, config)
+    await checkCliVersionOnce(resolved.command, resolved.versionArgs, entry.packageRoot, cliVersionChecked)
+    const result = await runCliBuild(entry, resolved.command, resolved.args, output)
     const parsed = parseCliOutput(result.combined)
 
     const panel = window.createWebviewPanel(
@@ -128,7 +132,7 @@ async function runBuild(
     )
     panel.webview.html = renderCliOutputHtml({
       title: `Build Output - ${entry.packageName}`,
-      commandLine: `${command} ${result.args.join(' ')}`,
+      commandLine: `${resolved.command} ${result.args.join(' ')}`,
       cwd: result.cwd,
       exitCode: result.exitCode,
       durationMs: result.durationMs,
@@ -152,6 +156,8 @@ async function runPreview(
   request: TestRunRequest,
   controller: ReturnType<typeof tests.createTestController>,
   itemData: WeakMap<TestItem, ItemData>,
+  runner: MokupRunner | undefined,
+  runnerVersionCache: Map<string, boolean>,
 ) {
   const run = controller.createTestRun(request)
   const items = collectItems(request, controller)
@@ -167,10 +173,20 @@ async function runPreview(
       'mokup.preview',
       `Mokup Preview: ${data.route.method.toUpperCase()} ${data.route.path}`,
       { viewColumn: getPreferredViewColumn(), preserveFocus: true },
-      { enableScripts: false },
+      { enableScripts: true },
     )
     const content = await readRouteFile(data.route.sourceFile)
-    panel.webview.html = renderPreviewHtml(data.route, content)
+    const baseUrl = resolveBaseUrl(data.entry, runner)
+    panel.webview.html = renderRequestPreviewHtml(data.route, content, {
+      cspSource: panel.webview.cspSource,
+      baseUrl,
+      instanceLabel: `${data.entry.packageName}: ${data.entry.dir}`,
+    })
+    panel.webview.onDidReceiveMessage(async (message) => {
+      if (await handleEnsureMockMessage(panel, message, data.entry, runner, runnerVersionCache))
+        return
+      await handlePreviewRequestMessage(panel, message)
+    })
     run.passed(item)
   }
 
@@ -210,40 +226,110 @@ function findEntryItem(
   return undefined
 }
 
-function applyRunnerMode(args: string[], mode: 'server' | 'sw'): string[] {
-  if (mode !== 'sw')
-    return args
-  const hasMode = args.some((arg, idx) => {
-    if (arg === '--mode')
-      return true
-    if (arg.startsWith('--mode='))
-      return true
-    if (arg === '--mode' && typeof args[idx + 1] === 'string')
-      return true
-    return false
-  })
-  if (hasMode)
-    return args
-  return [...args, '--mode', 'sw']
-}
-
 function getPreferredViewColumn(): ViewColumn {
   return window.activeTextEditor?.viewColumn ?? ViewColumn.One
 }
 
+function resolveBaseUrl(entry: DetectedEntry, runner?: MokupRunner): string | undefined {
+  if (!runner)
+    return undefined
+  const record = runner.getRunningEntries().find(item => item.entry.packageRoot === entry.packageRoot)
+  if (!record?.port)
+    return undefined
+  const host = record.host ?? 'localhost'
+  return `http://${formatHost(host)}:${record.port}`
+}
+
+function formatHost(host: string): string {
+  if (host.includes(':') && !host.startsWith('['))
+    return `[${host}]`
+  return host
+}
+
 async function checkCliVersionOnce(
   command: string,
+  args: string[],
   cwd: string,
   cache: Map<string, boolean>,
 ): Promise<void> {
-  if (cache.has(command))
+  const key = `${command}::${args.join('|')}`
+  if (cache.has(key))
     return
-  const result = await checkCliVersion(command, cwd || (workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd()))
-  cache.set(command, result.ok)
+  const result = await checkCliVersion(command, args, cwd || (workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd()))
+  cache.set(key, result.ok)
   if (!result.ok) {
     const message = result.output.trim()
-      ? `Mokup: failed to run "${command} --version". ${result.output.trim()}`
-      : `Mokup: failed to run "${command} --version".`
+      ? `Mokup: failed to run "${command} ${args.join(' ')}". ${result.output.trim()}`
+      : `Mokup: failed to run "${command} ${args.join(' ')}".`
     window.showWarningMessage(message)
   }
+}
+
+
+async function handleEnsureMockMessage(
+  panel: { webview: { postMessage: (data: unknown) => PromiseLike<boolean> } },
+  message: unknown,
+  entry: DetectedEntry,
+  runner: MokupRunner | undefined,
+  runnerVersionCache: Map<string, boolean>,
+): Promise<boolean> {
+  if (!message || typeof message !== 'object')
+    return false
+  const payload = message as { type?: string }
+  if (payload.type !== 'ensureMock')
+    return false
+
+  const reply = async (data: { type: 'ensureMockResult', ok: boolean, baseUrl?: string, error?: string }) => {
+    await panel.webview.postMessage(data)
+  }
+
+  if (!runner) {
+    await reply({ type: 'ensureMockResult', ok: false, error: 'Runner unavailable' })
+    return true
+  }
+
+  const existing = resolveBaseUrl(entry, runner)
+  if (existing) {
+    await reply({ type: 'ensureMockResult', ok: true, baseUrl: existing })
+    return true
+  }
+
+  const config = workspace.getConfiguration('mokup')
+  const resolved = await resolveRunnerCommand(entry, config)
+  await checkCliVersionOnce(resolved.command, resolved.versionArgs, entry.packageRoot, runnerVersionCache)
+  runner.start(entry, resolved.command, resolved.args)
+
+  const port = await waitForPort(runner, entry, 12000)
+  if (!port) {
+    await reply({ type: 'ensureMockResult', ok: false, error: 'Mock startup timed out' })
+    return true
+  }
+
+  await reply({ type: 'ensureMockResult', ok: true, baseUrl: `http://localhost:${port}` })
+  return true
+}
+
+function waitForPort(
+  runner: MokupRunner,
+  entry: DetectedEntry,
+  timeoutMs: number,
+): Promise<number | undefined> {
+  const running = runner.getRunningEntries().find(item => item.entry.packageRoot === entry.packageRoot)
+  if (running?.port)
+    return Promise.resolve(running.port)
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      dispose?.()
+      resolve(undefined)
+    }, timeoutMs)
+    const dispose = runner.onDidUpdate(() => {
+      const record = runner.getRunningEntries().find(item => item.entry.packageRoot === entry.packageRoot)
+      if (record?.port) {
+        clearTimeout(timeout)
+        dispose()
+        resolve(record.port)
+      }
+    })
+  })
 }

@@ -1,6 +1,6 @@
 import { defineExtension } from 'reactive-vscode'
 import path from 'node:path'
-import { StatusBarAlignment, Uri, ViewColumn, commands, env, window, workspace } from 'vscode'
+import { StatusBarAlignment, Uri, ViewColumn, commands, env, window, workspace, type WebviewPanel } from 'vscode'
 import { stringify as stringifyYaml } from 'yaml'
 import { detectOpenApiVersion, normalizeOpenApiDocument } from './openapi/compat'
 import { exportMokupToOpenApi } from './openapi/exporter'
@@ -13,11 +13,13 @@ import { planMockWritesForSchemas } from './dts/mock'
 import { parseDtsFile } from './dts/parser'
 import { scanDtsFiles } from './dts/scan'
 import { scanMockRoutes, type MockRoute } from './mock/routes'
-import { readRouteFile, renderPreviewHtml } from './preview/webview'
+import { readRouteFile, renderPreviewHtml, renderRequestPreviewHtml } from './preview/webview'
+import { handlePreviewRequestMessage } from './preview/request'
 import { MokupRoutesProvider } from './tree/provider'
 import { MokupRunner } from './runner/manager'
 import { createMokupTestController } from './testing/controller'
 import { checkCliVersion } from './runner/version'
+import { resolveRunnerCommand } from './runner/resolve'
 import { detectEntriesFromConfigFiles } from './scan/entries'
 import { collectWorkspaceEntries, type DetectedEntry } from './scan/collect'
 import { scanWorkspace } from './scan/workspace'
@@ -58,7 +60,7 @@ const { activate, deactivate } = defineExtension(() => {
   updateStatus()
   const routesProvider = new MokupRoutesProvider()
   const routesView = window.createTreeView('mokup.routes', { treeDataProvider: routesProvider })
-  const testController = createMokupTestController(output)
+  const testController = createMokupTestController(output, runner, cliVersionChecked)
 
   const subscriptions = [
     output,
@@ -344,14 +346,10 @@ const { activate, deactivate } = defineExtension(() => {
         if (!entry)
           return
         const config = workspace.getConfiguration('mokup')
-        const command = config.get<string>('runner.command', 'mokup')
-        const args = applyRunnerMode(
-          config.get<string[]>('runner.args', []),
-          config.get<'server' | 'sw'>('runner.mode', 'server'),
-        )
-        await checkCliVersionOnce(command, entry.packageRoot, cliVersionChecked)
+        const resolved = await resolveRunnerCommand(entry, config)
+        await checkCliVersionOnce(resolved.command, resolved.versionArgs, entry.packageRoot, cliVersionChecked)
         output.show(true)
-        runner.start(entry, command, args)
+        runner.start(entry, resolved.command, resolved.args)
       })()
     }),
     register('mokup.startAll', () => {
@@ -362,15 +360,16 @@ const { activate, deactivate } = defineExtension(() => {
           return
         }
         const config = workspace.getConfiguration('mokup')
-        const command = config.get<string>('runner.command', 'mokup')
-        const args = applyRunnerMode(
-          config.get<string[]>('runner.args', []),
-          config.get<'server' | 'sw'>('runner.mode', 'server'),
-        )
-        await checkCliVersionOnce(command, entries[0]?.packageRoot ?? '', cliVersionChecked)
+        const first = entries[0]
+        if (!first)
+          return
+        const resolvedFirst = await resolveRunnerCommand(first, config)
+        await checkCliVersionOnce(resolvedFirst.command, resolvedFirst.versionArgs, first.packageRoot, cliVersionChecked)
         output.show(true)
-        for (const entry of entries)
-          runner.start(entry, command, args)
+        for (const entry of entries) {
+          const resolved = await resolveRunnerCommand(entry, config)
+          runner.start(entry, resolved.command, resolved.args)
+        }
       })()
     }),
     register('mokup.stopMock', () => {
@@ -448,7 +447,7 @@ const { activate, deactivate } = defineExtension(() => {
       const route = routeArg ?? await pickRouteForPreview()
       if (!route)
         return
-      await previewRoute(route, 'mokup.preview', 'Mokup Preview')
+      await previewRoute(route, 'mokup.preview', 'Mokup Preview', runner, cliVersionChecked)
     }),
     register('mokup.routes.refresh', () => {
       routesProvider.refresh()
@@ -456,12 +455,12 @@ const { activate, deactivate } = defineExtension(() => {
     register('mokup.routes.previewSelected', async () => {
       const selected = routesView.selection[0]
       if (selected && 'route' in selected) {
-        await previewRoute(selected.route, 'mokup.preview', 'Mokup Preview')
+        await previewRoute(selected.route, 'mokup.preview', 'Mokup Preview', runner, cliVersionChecked)
         return
       }
       const route = await pickRouteForPreview()
       if (route)
-        await previewRoute(route, 'mokup.preview', 'Mokup Preview')
+        await previewRoute(route, 'mokup.preview', 'Mokup Preview', runner, cliVersionChecked)
     }),
   ]
 
@@ -487,15 +486,32 @@ async function pickRouteForPreview(): Promise<MockRoute | undefined> {
   return picked?.route
 }
 
-async function previewRoute(route: MockRoute, viewType: string, titlePrefix: string) {
+async function previewRoute(
+  route: MockRoute,
+  viewType: string,
+  titlePrefix: string,
+  runner?: MokupRunner,
+  cliVersionChecked?: Map<string, boolean>,
+) {
   const panel = window.createWebviewPanel(
     viewType,
     `${titlePrefix}: ${route.method.toUpperCase()} ${route.path}`,
     { viewColumn: getPreferredViewColumn(), preserveFocus: true },
-    { enableScripts: false },
+    { enableScripts: true },
   )
   const content = await readRouteFile(route.sourceFile)
-  panel.webview.html = renderPreviewHtml(route, content)
+  const entry = await findEntryForRoute(route)
+  const baseUrl = resolveBaseUrl(entry, runner)
+  panel.webview.html = renderRequestPreviewHtml(route, content, {
+    cspSource: panel.webview.cspSource,
+    baseUrl,
+    instanceLabel: entry ? `${entry.packageName}: ${entry.dir}` : undefined,
+  })
+  panel.webview.onDidReceiveMessage(async (message) => {
+    if (await handleEnsureMockMessage(panel, message, entry, runner, cliVersionChecked))
+      return
+    await handlePreviewRequestMessage(panel, message)
+  })
 }
 
 async function pickEntry() {
@@ -519,36 +535,120 @@ function getPreferredViewColumn(): ViewColumn {
   return window.activeTextEditor?.viewColumn ?? ViewColumn.One
 }
 
-function applyRunnerMode(args: string[], mode: 'server' | 'sw'): string[] {
-  if (mode !== 'sw')
-    return args
-  const hasMode = args.some((arg, idx) => {
-    if (arg === '--mode')
-      return true
-    if (arg.startsWith('--mode='))
-      return true
-    if (arg === '--mode' && typeof args[idx + 1] === 'string')
-      return true
+async function findEntryForRoute(route: MockRoute): Promise<DetectedEntry | undefined> {
+  if (!route.sourceFile || route.sourceFile === '(template preview)')
+    return undefined
+  const entries = await collectWorkspaceEntries()
+  let best: { entry: DetectedEntry, dir: string } | undefined
+  for (const entry of entries) {
+    const entryDir = path.join(entry.packageRoot, entry.dir)
+    if (route.sourceFile.startsWith(entryDir)) {
+      if (!best || entryDir.length > best.dir.length)
+        best = { entry, dir: entryDir }
+    }
+  }
+  return best?.entry
+}
+
+function resolveBaseUrl(entry: DetectedEntry | undefined, runner?: MokupRunner): string | undefined {
+  if (!entry || !runner)
+    return undefined
+  const record = runner.getRunningEntries().find(item => item.entry.packageRoot === entry.packageRoot)
+  if (!record?.port)
+    return undefined
+  const host = record.host ?? 'localhost'
+  return `http://${formatHost(host)}:${record.port}`
+}
+
+function formatHost(host: string): string {
+  if (host.includes(':') && !host.startsWith('['))
+    return `[${host}]`
+  return host
+}
+
+async function handleEnsureMockMessage(
+  panel: WebviewPanel,
+  message: unknown,
+  entry: DetectedEntry | undefined,
+  runner: MokupRunner | undefined,
+  cliVersionChecked: Map<string, boolean> | undefined,
+): Promise<boolean> {
+  if (!message || typeof message !== 'object')
     return false
+  const payload = message as { type?: string }
+  if (payload.type !== 'ensureMock')
+    return false
+
+  const reply = async (data: { type: 'ensureMockResult', ok: boolean, baseUrl?: string, error?: string }) => {
+    await panel.webview.postMessage(data)
+  }
+
+  if (!entry || !runner || !cliVersionChecked) {
+    await reply({ type: 'ensureMockResult', ok: false, error: 'Entry or runner unavailable' })
+    return true
+  }
+
+  const existing = resolveBaseUrl(entry, runner)
+  if (existing) {
+    await reply({ type: 'ensureMockResult', ok: true, baseUrl: existing })
+    return true
+  }
+
+  const config = workspace.getConfiguration('mokup')
+  const resolved = await resolveRunnerCommand(entry, config)
+  await checkCliVersionOnce(resolved.command, resolved.versionArgs, entry.packageRoot, cliVersionChecked)
+  runner.start(entry, resolved.command, resolved.args)
+
+  const port = await waitForPort(runner, entry, 12000)
+  if (!port) {
+    await reply({ type: 'ensureMockResult', ok: false, error: 'Mock startup timed out' })
+    return true
+  }
+
+  await reply({ type: 'ensureMockResult', ok: true, baseUrl: `http://localhost:${port}` })
+  return true
+}
+
+function waitForPort(
+  runner: MokupRunner,
+  entry: DetectedEntry,
+  timeoutMs: number,
+): Promise<number | undefined> {
+  const running = runner.getRunningEntries().find(item => item.entry.packageRoot === entry.packageRoot)
+  if (running?.port)
+    return Promise.resolve(running.port)
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      dispose?.()
+      resolve(undefined)
+    }, timeoutMs)
+    const dispose = runner.onDidUpdate(() => {
+      const record = runner.getRunningEntries().find(item => item.entry.packageRoot === entry.packageRoot)
+      if (record?.port) {
+        clearTimeout(timeout)
+        dispose()
+        resolve(record.port)
+      }
+    })
   })
-  if (hasMode)
-    return args
-  return [...args, '--mode', 'sw']
 }
 
 async function checkCliVersionOnce(
   command: string,
+  args: string[],
   cwd: string,
   cache: Map<string, boolean>,
 ): Promise<void> {
-  if (cache.has(command))
+  const key = `${command}::${args.join('|')}`
+  if (cache.has(key))
     return
-  const result = await checkCliVersion(command, cwd || (workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd()))
-  cache.set(command, result.ok)
+  const result = await checkCliVersion(command, args, cwd || (workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd()))
+  cache.set(key, result.ok)
   if (!result.ok) {
     const message = result.output.trim()
-      ? `Mokup: failed to run "${command} --version". ${result.output.trim()}`
-      : `Mokup: failed to run "${command} --version".`
+      ? `Mokup: failed to run "${command} ${args.join(' ')}". ${result.output.trim()}`
+      : `Mokup: failed to run "${command} ${args.join(' ')}".`
     window.showWarningMessage(message)
   }
 }

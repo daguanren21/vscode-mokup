@@ -14,6 +14,7 @@ export type MockRouteScanResult = {
 }
 
 const METHODS = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace']
+const DEFAULT_METHOD = 'get'
 const EXTENSIONS = ['ts', 'js', 'mjs', 'cjs', 'json', 'jsonc']
 
 export async function scanMockRoutes(entries: DetectedEntry[]): Promise<MockRouteScanResult> {
@@ -22,10 +23,19 @@ export async function scanMockRoutes(entries: DetectedEntry[]): Promise<MockRout
 
   for (const entry of entries) {
     const entryDir = path.join(entry.packageRoot, entry.dir)
-    const globs = METHODS.map(method => `**/*.${method}.{${EXTENSIONS.join(',')}}`)
+    const globs = [
+      ...METHODS.map(method => `**/*.${method}.{${EXTENSIONS.join(',')}}`),
+      `**/*.{${EXTENSIONS.join(',')}}`,
+    ]
+    const seenFiles = new Set<string>()
     for (const glob of globs) {
       const matches = await workspace.findFiles(new RelativePattern(entryDir, glob), '**/node_modules/**', 5000)
       for (const uri of matches) {
+        if (seenFiles.has(uri.fsPath))
+          continue
+        seenFiles.add(uri.fsPath)
+        if (uri.fsPath.endsWith('.d.ts'))
+          continue
         const route = routeFromFile(uri.fsPath, entryDir, entry.prefix)
         if (!route) {
           warnings.push(`Failed to parse route from ${uri.fsPath}`)
@@ -47,9 +57,27 @@ function routeFromFile(filePath: string, entryDir: string, prefix?: string): Moc
   const last = parts.pop() || ''
   const match = last.match(/^(.*)\.(get|post|put|patch|delete|head|options|trace)$/)
   if (!match)
-    return null
+    return buildRoute(DEFAULT_METHOD, last, parts, prefix, filePath)
   const name = match[1]
   const method = match[2]
+  const segments = name === 'index' ? parts : [...parts, name]
+  const pathValue = buildPath(segments, prefix)
+  return {
+    method,
+    path: pathValue === '/' ? '/' : pathValue.replace(/\/+$/, ''),
+    sourceFile: filePath,
+  }
+}
+
+function buildRoute(
+  method: string,
+  name: string,
+  parts: string[],
+  prefix: string | undefined,
+  filePath: string,
+): MockRoute | null {
+  if (!name)
+    return null
   const segments = name === 'index' ? parts : [...parts, name]
   const pathValue = buildPath(segments, prefix)
   return {

@@ -7,7 +7,9 @@
       "request": "launch",
       "runtimeExecutable": "${execPath}",
       "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}"
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "--folder",
+        "D:\\company code\\3pl"
       ],
       "outFiles": [
         "${workspaceFolder}/dist/**/*.js"

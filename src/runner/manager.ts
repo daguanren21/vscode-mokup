@@ -6,6 +6,7 @@ type ProcessRecord = {
   proc: ChildProcess
   entry: DetectedEntry
   port?: number
+  host?: string
 }
 
 export class MokupRunner {
@@ -78,10 +79,12 @@ export class MokupRunner {
     const record = this.processes.get(packageRoot)
     if (!record)
       return
-    const port = matchPort(text)
-    if (!port || record.port === port)
+    const detected = matchEndpoint(text)
+    if (!detected || record.port === detected.port)
       return
-    record.port = port
+    record.port = detected.port
+    if (detected.host)
+      record.host = detected.host
     this.emitter.fire()
   }
 }
@@ -93,20 +96,26 @@ function replacePlaceholders(value: string, entry: DetectedEntry): string {
     .replace(/\{prefix\}/g, entry.prefix ?? '')
 }
 
-function matchPort(text: string): number | undefined {
-  const patterns = [
-    /https?:\/\/localhost:(\d+)/i,
-    /https?:\/\/127\.0\.0\.1:(\d+)/i,
-    /\blocalhost:(\d+)/i,
-    /\b127\.0\.0\.1:(\d+)/i,
-    /\bport[:\s]+(\d{2,5})/i,
+function matchEndpoint(text: string): { host?: string, port: number } | undefined {
+  const patterns: Array<{ re: RegExp, hostIndex: number, portIndex: number }> = [
+    { re: /https?:\/\/localhost:(\d+)/i, hostIndex: -1, portIndex: 1 },
+    { re: /https?:\/\/127\.0\.0\.1:(\d+)/i, hostIndex: -1, portIndex: 1 },
+    { re: /https?:\/\/0\.0\.0\.0:(\d+)/i, hostIndex: -1, portIndex: 1 },
+    { re: /https?:\/\/\[(::1)\]:(\d+)/i, hostIndex: 1, portIndex: 2 },
+    { re: /https?:\/\/(::1):(\d+)/i, hostIndex: 1, portIndex: 2 },
+    { re: /\blocalhost:(\d+)/i, hostIndex: -1, portIndex: 1 },
+    { re: /\b127\.0\.0\.1:(\d+)/i, hostIndex: -1, portIndex: 1 },
+    { re: /\b0\.0\.0\.0:(\d+)/i, hostIndex: -1, portIndex: 1 },
+    { re: /\bport[:\s]+(\d{2,5})/i, hostIndex: -1, portIndex: 1 },
   ]
   for (const pattern of patterns) {
-    const match = text.match(pattern)
+    const match = text.match(pattern.re)
     if (match) {
-      const port = Number(match[1])
-      if (!Number.isNaN(port))
-        return port
+      const port = Number(match[pattern.portIndex])
+      if (Number.isNaN(port))
+        continue
+      const host = pattern.hostIndex > 0 ? match[pattern.hostIndex] : undefined
+      return { host, port }
     }
   }
   return undefined

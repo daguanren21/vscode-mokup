@@ -5,9 +5,9 @@ export type CliVersionResult = {
   output: string
 }
 
-export async function checkCliVersion(command: string, cwd: string): Promise<CliVersionResult> {
+export async function checkCliVersion(command: string, args: string[], cwd: string): Promise<CliVersionResult> {
   return await new Promise((resolve) => {
-    const proc = spawn(command, ['--version'], {
+    const proc = spawn(command, args, {
       cwd,
       shell: true,
       env: process.env,
