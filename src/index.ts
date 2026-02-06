@@ -24,7 +24,7 @@ import { detectEntriesFromConfigFiles } from './scan/entries'
 import { collectWorkspaceEntries, type DetectedEntry } from './scan/collect'
 import { scanWorkspace } from './scan/workspace'
 
-const { activate, deactivate } = defineExtension(() => {
+const { activate, deactivate } = defineExtension((context) => {
   const register = (id: string, handler: () => void) =>
     commands.registerCommand(id, handler)
 
@@ -60,7 +60,7 @@ const { activate, deactivate } = defineExtension(() => {
   updateStatus()
   const routesProvider = new MokupRoutesProvider()
   const routesView = window.createTreeView('mokup.routes', { treeDataProvider: routesProvider })
-  const testController = createMokupTestController(output, runner, cliVersionChecked)
+  const testController = createMokupTestController(output, runner, cliVersionChecked, context.extensionUri)
 
   const subscriptions = [
     output,
@@ -447,7 +447,7 @@ const { activate, deactivate } = defineExtension(() => {
       const route = routeArg ?? await pickRouteForPreview()
       if (!route)
         return
-      await previewRoute(route, 'mokup.preview', 'Mokup Preview', runner, cliVersionChecked)
+      await previewRoute(route, 'mokup.preview', 'Mokup Preview', runner, cliVersionChecked, context.extensionUri)
     }),
     register('mokup.routes.refresh', () => {
       routesProvider.refresh()
@@ -455,12 +455,12 @@ const { activate, deactivate } = defineExtension(() => {
     register('mokup.routes.previewSelected', async () => {
       const selected = routesView.selection[0]
       if (selected && 'route' in selected) {
-        await previewRoute(selected.route, 'mokup.preview', 'Mokup Preview', runner, cliVersionChecked)
+        await previewRoute(selected.route, 'mokup.preview', 'Mokup Preview', runner, cliVersionChecked, context.extensionUri)
         return
       }
       const route = await pickRouteForPreview()
       if (route)
-        await previewRoute(route, 'mokup.preview', 'Mokup Preview', runner, cliVersionChecked)
+        await previewRoute(route, 'mokup.preview', 'Mokup Preview', runner, cliVersionChecked, context.extensionUri)
     }),
   ]
 
@@ -492,6 +492,7 @@ async function previewRoute(
   titlePrefix: string,
   runner?: MokupRunner,
   cliVersionChecked?: Map<string, boolean>,
+  extensionUri?: Uri,
 ) {
   const panel = window.createWebviewPanel(
     viewType,
@@ -502,10 +503,14 @@ async function previewRoute(
   const content = await readRouteFile(route.sourceFile)
   const entry = await findEntryForRoute(route)
   const baseUrl = resolveBaseUrl(entry, runner)
+  if (!extensionUri)
+    throw new Error('Extension URI unavailable for preview rendering.')
   panel.webview.html = renderRequestPreviewHtml(route, content, {
     cspSource: panel.webview.cspSource,
     baseUrl,
     instanceLabel: entry ? `${entry.packageName}: ${entry.dir}` : undefined,
+    webview: panel.webview,
+    extensionUri,
   })
   panel.webview.onDidReceiveMessage(async (message) => {
     if (await handleEnsureMockMessage(panel, message, entry, runner, cliVersionChecked))

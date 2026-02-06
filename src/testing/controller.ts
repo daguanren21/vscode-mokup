@@ -31,6 +31,7 @@ export function createMokupTestController(
   output: OutputChannel,
   runner?: MokupRunner,
   runnerVersionChecked?: Map<string, boolean>,
+  extensionUri?: Uri,
 ) {
   const controller = tests.createTestController('mokup.tests', 'Mokup')
   const itemData = new WeakMap<TestItem, ItemData>()
@@ -51,7 +52,7 @@ export function createMokupTestController(
   controller.createRunProfile(
     'Preview Response',
     TestRunProfileKind.Debug,
-    request => runPreview(request, controller, itemData, runner, runnerVersionCache),
+    request => runPreview(request, controller, itemData, runner, runnerVersionCache, extensionUri),
     false,
   )
 
@@ -158,6 +159,7 @@ async function runPreview(
   itemData: WeakMap<TestItem, ItemData>,
   runner: MokupRunner | undefined,
   runnerVersionCache: Map<string, boolean>,
+  extensionUri?: Uri,
 ) {
   const run = controller.createTestRun(request)
   const items = collectItems(request, controller)
@@ -177,10 +179,14 @@ async function runPreview(
     )
     const content = await readRouteFile(data.route.sourceFile)
     const baseUrl = resolveBaseUrl(data.entry, runner)
+    if (!extensionUri)
+      throw new Error('Extension URI unavailable for preview rendering.')
     panel.webview.html = renderRequestPreviewHtml(data.route, content, {
       cspSource: panel.webview.cspSource,
       baseUrl,
       instanceLabel: `${data.entry.packageName}: ${data.entry.dir}`,
+      webview: panel.webview,
+      extensionUri,
     })
     panel.webview.onDidReceiveMessage(async (message) => {
       if (await handleEnsureMockMessage(panel, message, data.entry, runner, runnerVersionCache))
